@@ -3,46 +3,6 @@ param (
     [string]$Parameter1        
 )
 
-function Show-Options {
-    Write-Host -ForegroundColor Cyan "Available Options:"
-    Write-Host ""
-    Write-Host -ForegroundColor Cyan "Usage: .\recon.ps1 <function> <parameter>"
-    Write-Host ""
-    Write-Host -ForegroundColor Yellow "Options:"
-    Write-Host -ForegroundColor Green "  fubon, find-userbasedonname <name>      " -NoNewline
-    Write-Host "- Finds a user based on the provided name."
-    Write-Host -ForegroundColor Green "  fa, find-allusers                       " -NoNewline
-    Write-Host "- Lists all users in the domain."
-    Write-Host ""
-    Write-Host -ForegroundColor Yellow "Example:"
-    Write-Host -ForegroundColor White "  .\recon.ps1 fubon 'jeffadmin'"
-    Write-Host ""
-}
-
-$PDC = Get-PrimaryDomainController
-$domainDN = Get-DomainRootDistinguishedName
-$baseLdapQuery = "LDAP://$PDC/$domainDN"
-
-if ($FunctionKeyword -eq "-h" -or $FunctionKeyword -eq "--help") {
-    Show-Options
-    return
-}
-
-# Switch to handle function calls based on keywords
-switch ($FunctionKeyword.ToLower()) {
-    "fubon" {  # Short for Find-UserBasedOnName
-        $result = Find-UserBasedOnName -baseLdapQuery $baseLdapQuery -name $Parameter1
-        Get-PropertiesFromObjectsPrettyPrint $result  # Apply pretty print here
-    }
-    "fa" {  # Short for Find-AllUsers
-        $result = Find-AllUsers -baseLdapQuery $baseLdapQuery
-        Get-PropertiesFromObjectsPrettyPrint $result  # Consistent formatting for all functions
-    }
-    default {
-       Show-Options
-    }
-    
-}
 
 # Define a list of standard AD groups from the provided Microsoft documentation
 $standardGroups = @(
@@ -93,17 +53,20 @@ function Get-PropertiesFromObjectsOld($objects) {
 function Get-PropertiesFromObjectsPrettyPrint($objects) {
     Foreach($obj in $objects) {
         Foreach ($prop in $obj.Properties.PropertyNames) {
-            # Grabs the name of the properti and the value assosiated with it.
             $propName = $prop
             $propValue = $obj.Properties[$prop]
             
-            # If the value is an array, we will join all of the objects togheter so that they are all stored in the $propValue var.
             if ($propValue -is [System.Collections.IEnumerable] -and -not ($propValue -is [string])) {
                 $propValue = $propValue -join ", "
             }
+
+            if ($propName -eq "samaccountname" ) {
+                Write-Host "$propName $propValue" -ForegroundColor Cyan
+                Continue
+            }
             
             if ($propName -eq "memberof") {
-                Write-Host "Groups:" -ForegroundColor White
+                Write-Host "Is a memeber of:" -ForegroundColor Cyan
                 Foreach ($group in $obj.Properties["memberof"]) {
                     $groupName = $group -replace '^CN=([^,]+),.*', '$1'
                     
@@ -147,7 +110,54 @@ function Find-UserBasedOnName($baseLdapQuery, $name) {
     return Find-ObjectBasedOnFilter $baseLdapQuery "(&(objectCategory=person)(name=$name))"
 }
 
+
 # Finds all users based on a name
 function Find-ObjectBasedOnName($baseLdapQuery, $name) {
     return Find-ObjectBasedOnFilter $baseLdapQuery "(name=$name)"
+}
+
+
+function Show-Options {
+    Write-Host -ForegroundColor Cyan "Available Options:"
+    Write-Host ""
+    Write-Host -ForegroundColor Cyan "Usage: .\recon.ps1 <function> <parameter>"
+    Write-Host ""
+    Write-Host -ForegroundColor Yellow "Options:"
+    Write-Host -ForegroundColor Green "  fubon, find-userbasedonname <name>      " -NoNewline
+    Write-Host "- Finds a user based on the provided name."
+    Write-Host -ForegroundColor Green "  fa, find-allusers                       " -NoNewline
+    Write-Host "- Lists all users in the domain."
+    Write-Host ""
+    Write-Host -ForegroundColor Yellow "Example:"
+    Write-Host -ForegroundColor White "  .\recon.ps1 fubon 'jeffadmin'"
+    Write-Host ""
+}
+
+$PDC = Get-PrimaryDomainController
+$domainDN = Get-DomainRootDistinguishedName
+$baseLdapQuery = "LDAP://$PDC/$domainDN"
+
+if ($FunctionKeyword -eq "-h" -or $FunctionKeyword -eq "--help") {
+    Show-Options
+    return
+}
+
+# Switch to handle function calls based on keywords
+switch ($FunctionKeyword.ToLower()) {
+    "fu" {  # Short for find user
+        $result = Find-UserBasedOnName -baseLdapQuery $baseLdapQuery -name $Parameter1
+        Get-PropertiesFromObjectsPrettyPrint $result  
+    }
+    "fa" {  # Short for Find-AllUsers
+        $result = Find-AllUsers -baseLdapQuery $baseLdapQuery
+        Get-PropertiesFromObjectsPrettyPrint $result  
+    }
+    "search"{
+        $result = Find-ObjectBasedOnFilter -baseLdapQuery $baseLdapQuery -filter $Parameter1
+        Get-PropertiesFromObjectsPrettyPrint $result
+    }
+    default {
+       Show-Options
+    }
+    
 }
