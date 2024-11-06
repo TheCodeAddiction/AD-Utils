@@ -87,31 +87,28 @@ function Get-PropertiesFromObjectsPrettyPrint($objects) {
 
 # Finds all SAM_NORMAL_USER_ACCOUNT objects. This might contain Computers and others. To find all "users" use Find-AllUsers
 function Find-AllUsersAccounts($baseLdapQuery) {
-    $userObjects = Find-ObjectBasedOnFilter $baseLdapQuery "samAccountType=805306368"
-    Get-PropertiesFromObjectsPrettyPrint $userObjects
+    return Find-ObjectBasedOnFilter $baseLdapQuery "samAccountType=805306368"
 }
 
 # Finds all "users"
 function Find-AllUsers($baseLdapQuery) { 
     $filter = "(&(objectCategory=person)(objectClass=user))"
-    $userObjects = Find-ObjectBasedOnFilter $baseLdapQuery $filter
-    Get-PropertiesFromObjectsPrettyPrint $userObjects
+    return Find-ObjectBasedOnFilter $baseLdapQuery $filter
 }
 
 # Finds all users based on a name
 function Find-UserBasedOnName($baseLdapQuery, $name) {
-    $userObjects = Find-ObjectBasedOnFilter $baseLdapQuery "(&(objectCategory=person)(name=$name))"
-    Get-PropertiesFromObjectsPrettyPrint $userObjects
+    return Find-ObjectBasedOnFilter $baseLdapQuery "(&(objectCategory=person)(name=$name))"
 }
 
 # Finds all users based on a name
 function Find-ObjectBasedOnName($baseLdapQuery, $name) {
-    $userObjects = Find-ObjectBasedOnFilter $baseLdapQuery "(name=$name)"
-    Get-PropertiesFromObjectsPrettyPrint $userObjects
+    return Find-ObjectBasedOnFilter $baseLdapQuery "(name=$name)"
 }
 
 $PDC = Get-PrimaryDomainController
 $domainDN = Get-DomainRootDistinguishedName
 $baseLdapQuery = "LDAP://$PDC/$domainDN"
 
-Find-AllUsers $baseLdapQuery
+$objects = Find-AllUsers $baseLdapQuery
+Get-PropertiesFromObjectsPrettyPrint $objects
