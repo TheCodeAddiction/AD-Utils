@@ -1,3 +1,49 @@
+param (
+    [string]$FunctionKeyword,
+    [string]$Parameter1        
+)
+
+function Show-Options {
+    Write-Host -ForegroundColor Cyan "Available Options:"
+    Write-Host ""
+    Write-Host -ForegroundColor Cyan "Usage: .\recon.ps1 <function> <parameter>"
+    Write-Host ""
+    Write-Host -ForegroundColor Yellow "Options:"
+    Write-Host -ForegroundColor Green "  fubon, find-userbasedonname <name>      " -NoNewline
+    Write-Host "- Finds a user based on the provided name."
+    Write-Host -ForegroundColor Green "  fa, find-allusers                       " -NoNewline
+    Write-Host "- Lists all users in the domain."
+    Write-Host ""
+    Write-Host -ForegroundColor Yellow "Example:"
+    Write-Host -ForegroundColor White "  .\recon.ps1 fubon 'jeffadmin'"
+    Write-Host ""
+}
+
+$PDC = Get-PrimaryDomainController
+$domainDN = Get-DomainRootDistinguishedName
+$baseLdapQuery = "LDAP://$PDC/$domainDN"
+
+if ($FunctionKeyword -eq "-h" -or $FunctionKeyword -eq "--help") {
+    Show-Options
+    return
+}
+
+# Switch to handle function calls based on keywords
+switch ($FunctionKeyword.ToLower()) {
+    "fubon" {  # Short for Find-UserBasedOnName
+        $result = Find-UserBasedOnName -baseLdapQuery $baseLdapQuery -name $Parameter1
+        Get-PropertiesFromObjectsPrettyPrint $result  # Apply pretty print here
+    }
+    "fa" {  # Short for Find-AllUsers
+        $result = Find-AllUsers -baseLdapQuery $baseLdapQuery
+        Get-PropertiesFromObjectsPrettyPrint $result  # Consistent formatting for all functions
+    }
+    default {
+       Show-Options
+    }
+    
+}
+
 # Define a list of standard AD groups from the provided Microsoft documentation
 $standardGroups = @(
     "Account Operators", "Administrators", "Backup Operators", "Domain Admins", "Domain Guests",
@@ -105,10 +151,3 @@ function Find-UserBasedOnName($baseLdapQuery, $name) {
 function Find-ObjectBasedOnName($baseLdapQuery, $name) {
     return Find-ObjectBasedOnFilter $baseLdapQuery "(name=$name)"
 }
-
-$PDC = Get-PrimaryDomainController
-$domainDN = Get-DomainRootDistinguishedName
-$baseLdapQuery = "LDAP://$PDC/$domainDN"
-
-$objects = Find-AllUsers $baseLdapQuery
-Get-PropertiesFromObjectsPrettyPrint $objects
