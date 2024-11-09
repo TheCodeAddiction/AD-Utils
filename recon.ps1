@@ -202,6 +202,93 @@ function Get-PropertiesFromObjectsPrettyPrint($objects) {
 }
 
 
+# Lists all ACL permissions that a objectName has over other objects
+function Get-PermissionsForObject($objectName, $allDomainObjects){
+    if ([string]::IsNullOrWhiteSpace($objectName)) {
+        Write-Host "Error: Object name cannot be empty." -ForegroundColor Red
+        return
+    }
+    $filter = "(&(objectCategory=user)(cn=$objectName))"
+    $subjectObject = Find-ObjectBasedOnFilter -baseLdapQuery $baseLdapQuery -filter $filter
+
+    if ($subjectObject.Count -eq 0) {
+        Write-Host "Object not found: $objectName" -ForegroundColor Red
+        return
+    }
+
+    # grabs a list of all objects in the domain that has a distinguishedName
+    $distinguishedNames = @()
+    foreach ($obj in $allDomainObjects) {
+        if ($obj.Properties["distinguishedName"].Count -gt 0) {
+            $distinguishedName = $obj.Properties["distinguishedName"][0]
+            if (-not [string]::IsNullOrWhiteSpace($distinguishedName)) {
+                $distinguishedNames += $distinguishedName
+            }
+        }
+    }
+
+    foreach ($distinguishedName in $distinguishedNames){
+        Write-Host $distinguishedName
+    }
+
+
+}
+# Grabs the ACL for a given object. This will list all objects that have permissions over the object submited with $objectName.
+function Get-AclForObject($distinguishedName) {
+    # Find the specified object in AD
+    $filter = "(distinguishedname=$distinguishedName)"
+    Write-Host "filter is $filter"
+    $object = Find-ObjectBasedOnFilter -baseLdapQuery $baseLdapQuery -filter $filter
+
+    if ($object.Count -eq 0) {
+        Write-Host "Object not found: $distinguishedName" -ForegroundColor Red
+        return
+    }
+
+    # Get the Distinguished Name (DN) of the found object
+    $objectDN = $object[0].Properties.distinguishedname[0]
+    Write-Host "Checking ACLs for object: $objectDN" -ForegroundColor Cyan
+
+    $directoryEntry = New-Object System.DirectoryServices.DirectoryEntry("LDAP://$objectDN")
+    $securityDescriptor = $directoryEntry.psbase.ObjectSecurity
+    $accessRules = $securityDescriptor.GetAccessRules($true, $true, [System.Security.Principal.NTAccount])
+
+    foreach ($rule in $accessRules) {
+        $aclName = $rule.ActiveDirectoryRights.ToString()
+        
+        # Translate common GUIDs to friendly names
+        $appliesToDescription = switch ($rule.ObjectType.ToString()) {
+            "00000000-0000-0000-0000-000000000000" { "Entire object" }
+            "bf967aba-0de6-11d0-a285-00aa003049e2" { "User objects" }
+            "9b026da6-0d3c-465c-8bee-5199d7165cba" { "Group membership" }
+            "19195a5a-6da0-11d0-afd3-00c04fd930c9" { "Computer objects" }
+            "e48d0154-bcf8-11d1-8702-00c04fb96050" { "All properties" }
+            default { "Unknown or other object type" }
+        }
+
+        # Identify important ACLs and their abuse potential
+        switch ($aclName) {
+            "ForceChangePassword" { $abuse = "abused with Set-DomainUserPassword" }
+            "Add Member"          { $abuse = "abused with Add-DomainGroupMember" }
+            "GenericAll"          { $abuse = "abused with Set-DomainUserPassword or Add-DomainGroupMember" }
+            "GenericWrite"        { $abuse = "abused with Set-DomainObject" }
+            "WriteOwner"          { $abuse = "abused with Set-DomainObjectOwner" }
+            "WriteDACL"           { $abuse = "abused with Add-DomainObjectACL" }
+            "AllExtendedRights"   { $abuse = "abused with Set-DomainUserPassword or Add-DomainGroupMember" }
+            "Self"                { $abuse = "abused with Add-DomainGroupMember" }
+            Default               { $abuse = $null }  # Skip unimportant ACLs
+        }
+
+        if ($abuse) {
+            Write-Host "Important ACL Entry Found!" -ForegroundColor Green
+            Write-Host " : $($rule.IdentityReference.Value)" -ForegroundColor Cyan
+            Write-Host " Permission: $aclName" -ForegroundColor Yellow
+            Write-Host " Abuse Potential: $abuse" -ForegroundColor Red
+            Write-Host " Applies to: $appliesToDescription" -ForegroundColor Magenta
+            Write-Host "-------------------------------" -ForegroundColor White
+        }
+    }
+}
 
 
 # Finds all SAM_NORMAL_USER_ACCOUNT objects. This might contain Computers and others. To find all "users" use Find-AllUsers
@@ -281,6 +368,10 @@ switch ($FunctionKeyword.ToLower()) {
     "fg"{ # Short for Find-Group
         $result = Find-Group -baseLdapQuery $baseLdapQuery -groupName $Parameter1
         Get-PropertiesFromObjectsPrettyPrint $result
+    }
+    "getacl"{
+        $allDomainObjects = Find-AllObjectsFromRoot -baseLdapQuery $baseLdapQuery
+        Get-PermissionsForObject -objectName $Parameter1 -allDomainObjects $allDomainObjects
     }
 
     "search"{
