@@ -111,7 +111,7 @@ function Get-AllGroupsRecursively ($groupName, $level) {
         foreach ($member in $groupObject[0].Properties["member"]) {
             $memberName = $member -replace '^CN=([^,]+),.*', '$1'
             if (Test-IfObjectIsAGroup $memberName) {
-                Get-AllGroupMembersRecursively -groupName $memberName -level ($level + 1)
+                Get-AllGroupMembersRecursivelyForPrint -groupName $memberName -level ($level + 1)
             }
         }
     }
@@ -119,7 +119,7 @@ function Get-AllGroupsRecursively ($groupName, $level) {
 
 
 # Prints all groups and users of each group recursivly, in a user friendly way.
-function Get-AllGroupMembersRecursively ($groupName, $level) {
+function Get-AllGroupMembersRecursivelyForPrint ($groupName, $level) {
     $groupObject = Find-Group -baseLdapQuery $baseLdapQuery -groupName $groupName
 
     if ($groupObject.Count -gt 0) {
@@ -138,13 +138,41 @@ function Get-AllGroupMembersRecursively ($groupName, $level) {
         foreach ($member in $groupObject[0].Properties["member"]) {
             $memberName = $member -replace '^CN=([^,]+),.*', '$1'
             if (Test-IfObjectIsAGroup $memberName) {
-                Get-AllGroupMembersRecursively -groupName $memberName -level ($level + 1)
+                Get-AllGroupMembersRecursivelyForPrint -groupName $memberName -level ($level + 1)
             }
             else {
                 Write-Host "$indentation    - $memberName" -ForegroundColor Yellow  # Print member with indentation
             }
         }
     }
+}
+
+
+
+# Returns a list of objects that are memebers of a group or sub memebers of a group
+function Get-AllSubGroupAndMembersRecursively($GroupNames) {
+    $groupsAndUsers = @()
+    foreach ($groupName in $GroupNames) {
+        $groupObject = Find-Group -groupName $groupName
+
+        if ($groupObject.Count -eq 0) {
+            Write-Warning "Group '$groupName' not found."
+            continue
+        }
+
+        foreach ($member in $groupObject[0].Properties["member"]) {
+            $memberName = $member -replace '^CN=([^,]+),.*', '$1'
+
+            if (Test-IfObjectIsAGroup -objectName $memberName) {
+                $groupsAndUsers += $memberName
+                $nestedMembers = Get-AllSubGroupAndMembersRecursively -GroupNames @($memberName)
+                $groupsAndUsers += $nestedMembers
+            } else {
+                $groupsAndUsers += $memberName
+            }
+        }
+    }
+    return $groupsAndUsers
 }
 
 # Prints all properties in an object but adds coloring for clarity
@@ -169,7 +197,7 @@ function Get-PropertiesFromObjectsPrettyPrint($objects) {
                 Foreach ($member in $obj.Properties["member"]){
                     $memberName = $member -replace '^CN=([^,]+),.*', '$1'
                     if (Test-IfObjectIsAGroup $memberName){
-                        Get-AllGroupMembersRecursively -groupName $memberName -level 0
+                        Get-AllGroupMembersRecursivelyForPrint -groupName $memberName -level 0
                     }
                     else{
                         Write-Host " - $memberName" -ForegroundColor Yellow
@@ -202,23 +230,24 @@ function Get-PropertiesFromObjectsPrettyPrint($objects) {
 }
 
 
-# Lists all ACL permissions that a objectName has over other objects
-function Get-PermissionsForObject($objectName, $allDomainObjects){
+# Lists all important ACEs that a $objectName has over all users and groups
+function Get-ImportantPermissionsOverObjects($objectName, $targetObjects){
     if ([string]::IsNullOrWhiteSpace($objectName)) {
         Write-Host "Error: Object name cannot be empty." -ForegroundColor Red
         return
     }
-    $filter = "(&(objectCategory=user)(cn=$objectName))"
+    $filter = "cn=$objectName"
     $subjectObject = Find-ObjectBasedOnFilter -baseLdapQuery $baseLdapQuery -filter $filter
 
     if ($subjectObject.Count -eq 0) {
         Write-Host "Object not found: $objectName" -ForegroundColor Red
         return
     }
+    Write-Host "found our object: $subjectObject"
 
-    # grabs a list of all objects in the domain that has a distinguishedName
+
     $distinguishedNames = @()
-    foreach ($obj in $allDomainObjects) {
+    foreach ($obj in $targetObjects) {
         if ($obj.Properties["distinguishedName"].Count -gt 0) {
             $distinguishedName = $obj.Properties["distinguishedName"][0]
             if (-not [string]::IsNullOrWhiteSpace($distinguishedName)) {
@@ -226,18 +255,38 @@ function Get-PermissionsForObject($objectName, $allDomainObjects){
             }
         }
     }
+    
+
+    # I want to take in a list of users and groups, found after running the getuser thing which shows all sub groups and their users
+    # I then want to run the check downbelow, and check if the IdentityReference is user we are searching for or any group that user is a member of
+
+    $objectsWithImportantAces = @()
 
     foreach ($distinguishedName in $distinguishedNames){
-        Write-Host $distinguishedName
+        Write-Host ("All targets distingt names: $distinguishedName")
+        $objectsWithImportantAces += Get-ImportantAceForObject($distinguishedName)
+    }
+
+    foreach ($object in $objectsWithImportantAces){
+        if ($object.IdentityReference -eq $objectName){
+            #Write-Host "Object $($object.IdentityReference) has $($object.ActiveDirectoryRights) over $($object.AppliesToDescription)" -ForegroundColor Cyan
+            #Write-Host "-------------------------------" -ForegroundColor White
+        }
+        else{
+            #Write-Host "Object $($object.IdentityReference) has $($object.ActiveDirectoryRights) over $($object.AppliesToDescription)" -ForegroundColor Red
+            #Write-Host "-------------------------------" -ForegroundColor White
+            
+        }
     }
 
 
 }
 # Grabs the ACL for a given object. This will list all objects that have permissions over the object submited with $objectName.
-function Get-AclForObject($distinguishedName) {
+function Get-ImportantAceForObject($distinguishedName) {
+    $importantAces = @()
+
     # Find the specified object in AD
     $filter = "(distinguishedname=$distinguishedName)"
-    Write-Host "filter is $filter"
     $object = Find-ObjectBasedOnFilter -baseLdapQuery $baseLdapQuery -filter $filter
 
     if ($object.Count -eq 0) {
@@ -247,15 +296,13 @@ function Get-AclForObject($distinguishedName) {
 
     # Get the Distinguished Name (DN) of the found object
     $objectDN = $object[0].Properties.distinguishedname[0]
-    Write-Host "Checking ACLs for object: $objectDN" -ForegroundColor Cyan
-
     $directoryEntry = New-Object System.DirectoryServices.DirectoryEntry("LDAP://$objectDN")
     $securityDescriptor = $directoryEntry.psbase.ObjectSecurity
     $accessRules = $securityDescriptor.GetAccessRules($true, $true, [System.Security.Principal.NTAccount])
 
     foreach ($rule in $accessRules) {
         $aclName = $rule.ActiveDirectoryRights.ToString()
-        
+
         # Translate common GUIDs to friendly names
         $appliesToDescription = switch ($rule.ObjectType.ToString()) {
             "00000000-0000-0000-0000-000000000000" { "Entire object" }
@@ -267,27 +314,28 @@ function Get-AclForObject($distinguishedName) {
         }
 
         # Identify important ACLs and their abuse potential
-        switch ($aclName) {
-            "ForceChangePassword" { $abuse = "abused with Set-DomainUserPassword" }
-            "Add Member"          { $abuse = "abused with Add-DomainGroupMember" }
-            "GenericAll"          { $abuse = "abused with Set-DomainUserPassword or Add-DomainGroupMember" }
-            "GenericWrite"        { $abuse = "abused with Set-DomainObject" }
-            "WriteOwner"          { $abuse = "abused with Set-DomainObjectOwner" }
-            "WriteDACL"           { $abuse = "abused with Add-DomainObjectACL" }
-            "AllExtendedRights"   { $abuse = "abused with Set-DomainUserPassword or Add-DomainGroupMember" }
-            "Self"                { $abuse = "abused with Add-DomainGroupMember" }
-            Default               { $abuse = $null }  # Skip unimportant ACLs
+        $abuse = switch ($aclName) {
+            "ForceChangePassword" { "abused with Set-DomainUserPassword" }
+            "Add Member"          { "abused with Add-DomainGroupMember" }
+            "GenericAll"          { "abused with Set-DomainUserPassword or Add-DomainGroupMember" }
+            "GenericWrite"        { "abused with Set-DomainObject" }
+            "WriteOwner"          { "abused with Set-DomainObjectOwner" }
+            "WriteDACL"           { "abused with Add-DomainObjectACL" }
+            "AllExtendedRights"   { "abused with Set-DomainUserPassword or Add-DomainGroupMember" }
+            "Self"                { "abused with Add-DomainGroupMember" }
+            default               { $null }  # Skip unimportant ACLs
         }
 
         if ($abuse) {
-            Write-Host "Important ACL Entry Found!" -ForegroundColor Green
-            Write-Host " : $($rule.IdentityReference.Value)" -ForegroundColor Cyan
-            Write-Host " Permission: $aclName" -ForegroundColor Yellow
-            Write-Host " Abuse Potential: $abuse" -ForegroundColor Red
-            Write-Host " Applies to: $appliesToDescription" -ForegroundColor Magenta
-            Write-Host "-------------------------------" -ForegroundColor White
+            $importantAces += [PSCustomObject]@{
+                IdentityReference     = $rule.IdentityReference.Value
+                ActiveDirectoryRights = $aclName
+                AppliesToDescription  = $appliesToDescription
+                AbusePotential        = $abuse
+            }
         }
     }
+    return $importantAces
 }
 
 
@@ -309,8 +357,30 @@ function Find-AllGroups ($baseLdapQuery){
 }
 
 function Find-Group ($baseLdapQuery, $groupName){
+    
     $filter = "(&(objectCategory=group)(cn=$groupName))"
     return Find-ObjectBasedOnFilter $baseLdapQuery $filter
+}
+
+function Find-AllGroupsObjectIsAMemberOf($objects){ 
+    $groups = @()
+    Foreach($obj in $objects) {
+        Foreach ($prop in $obj.Properties.PropertyNames) {
+            $propName = $prop
+            $propValue = $obj.Properties[$prop]
+            if ($propValue -is [System.Collections.IEnumerable] -and -not ($propValue -is [string])) {
+                $propValue = $propValue -join ", "
+            }
+            if ($propName -eq "memberof") { 
+                foreach ($group in $obj.Properties["memberof"]) {
+                    $groupName = $group -replace '^CN=([^,]+),.*', '$1'
+                    $groups += $groupName
+                }
+            }
+
+        }
+    }
+    return $groups
 }
 
 # Finds all users based on a name
@@ -370,13 +440,25 @@ switch ($FunctionKeyword.ToLower()) {
         Get-PropertiesFromObjectsPrettyPrint $result
     }
     "getacl"{
-        $allDomainObjects = Find-AllObjectsFromRoot -baseLdapQuery $baseLdapQuery
-        Get-PermissionsForObject -objectName $Parameter1 -allDomainObjects $allDomainObjects
+        # Find all groups an object is a part of
+        # call FindAllgroupsrecurv to make sure we have a list of all groups and their memebers
+        # Run the ACE check
+        Get-ImportantPermissionsOverObjects -objectName $Parameter1 -allDomainObjects $allDomainObjects
     }
 
     "search"{
-        $result = Find-ObjectBasedOnFilter -baseLdapQuery $baseLdapQuery -filter $Parameter1
+        $groups = Find-AllGroups -baseLdapQuery $baseLdapQuery -name $Parameter1
+        $result = Find-ObjectBasedOnFilter -objects $groups
         Get-PropertiesFromObjectsPrettyPrint $result
+    }
+    "test"{
+        $objects = Find-UserBasedOnName -baseLdapQuery $baseLdapQuery -name $Parameter1
+        $groups = Find-AllGroupsObjectIsAMemberOf -objects $objects
+        $allSubGroupsAndMemebers = Get-AllSubGroupAndMembersRecursively -GroupNames $groups
+        $fullTargetList = $allSubGroupsAndMemebers + $groups
+        foreach ($target in $fullTargetList){
+            Write-Host $target
+        }
     }
     default {
        Show-Options
