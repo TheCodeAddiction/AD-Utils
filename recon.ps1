@@ -248,95 +248,76 @@ function Get-ImportantPermissionsOverObjects($objectName, $targetObjects){
 
     $distinguishedNames = @()
     foreach ($obj in $targetObjects) {
-        if ($obj.Properties["distinguishedName"].Count -gt 0) {
-            $distinguishedName = $obj.Properties["distinguishedName"][0]
-            if (-not [string]::IsNullOrWhiteSpace($distinguishedName)) {
-                $distinguishedNames += $distinguishedName
-            }
+        Write-Host $obj
+        # check the ACE assigned to the object
         }
     }
     
-
-    # I want to take in a list of users and groups, found after running the getuser thing which shows all sub groups and their users
-    # I then want to run the check downbelow, and check if the IdentityReference is user we are searching for or any group that user is a member of
-
-    $objectsWithImportantAces = @()
-
-    foreach ($distinguishedName in $distinguishedNames){
-        Write-Host ("All targets distingt names: $distinguishedName")
-        $objectsWithImportantAces += Get-ImportantAceForObject($distinguishedName)
-    }
-
-    foreach ($object in $objectsWithImportantAces){
-        if ($object.IdentityReference -eq $objectName){
-            #Write-Host "Object $($object.IdentityReference) has $($object.ActiveDirectoryRights) over $($object.AppliesToDescription)" -ForegroundColor Cyan
-            #Write-Host "-------------------------------" -ForegroundColor White
-        }
-        else{
-            #Write-Host "Object $($object.IdentityReference) has $($object.ActiveDirectoryRights) over $($object.AppliesToDescription)" -ForegroundColor Red
-            #Write-Host "-------------------------------" -ForegroundColor White
-            
-        }
-    }
-
-
-}
 # Grabs the ACL for a given object. This will list all objects that have permissions over the object submited with $objectName.
-function Get-ImportantAceForObject($distinguishedName) {
-    $importantAces = @()
+function Find-ImportantPermissions($ObjectNames, $TargetUser) {
+    $dangerousPermissions = @(
+        'ForceChangePassword', 
+        'AddMembers', 
+        'GenericAll', 
+        'GenericWrite', 
+        'WriteOwner', 
+        'WriteDacl', 
+        'AllExtendedRights', 
+        'Self'
+    )
 
-    # Find the specified object in AD
-    $filter = "(distinguishedname=$distinguishedName)"
-    $object = Find-ObjectBasedOnFilter -baseLdapQuery $baseLdapQuery -filter $filter
+    $matchingRules = @()  # Initialize an array to store matching rules
 
-    if ($object.Count -eq 0) {
-        Write-Host "Object not found: $distinguishedName" -ForegroundColor Red
-        return
-    }
+    foreach ($name in $ObjectNames) {
+        Write-Host "Retrieving ACLs for: $name" -ForegroundColor Yellow
 
-    # Get the Distinguished Name (DN) of the found object
-    $objectDN = $object[0].Properties.distinguishedname[0]
-    $directoryEntry = New-Object System.DirectoryServices.DirectoryEntry("LDAP://$objectDN")
-    $securityDescriptor = $directoryEntry.psbase.ObjectSecurity
-    $accessRules = $securityDescriptor.GetAccessRules($true, $true, [System.Security.Principal.NTAccount])
-
-    foreach ($rule in $accessRules) {
-        $aclName = $rule.ActiveDirectoryRights.ToString()
-
-        # Translate common GUIDs to friendly names
-        $appliesToDescription = switch ($rule.ObjectType.ToString()) {
-            "00000000-0000-0000-0000-000000000000" { "Entire object" }
-            "bf967aba-0de6-11d0-a285-00aa003049e2" { "User objects" }
-            "9b026da6-0d3c-465c-8bee-5199d7165cba" { "Group membership" }
-            "19195a5a-6da0-11d0-afd3-00c04fd930c9" { "Computer objects" }
-            "e48d0154-bcf8-11d1-8702-00c04fb96050" { "All properties" }
-            default { "Unknown or other object type" }
-        }
-
-        # Identify important ACLs and their abuse potential
-        $abuse = switch ($aclName) {
-            "ForceChangePassword" { "abused with Set-DomainUserPassword" }
-            "Add Member"          { "abused with Add-DomainGroupMember" }
-            "GenericAll"          { "abused with Set-DomainUserPassword or Add-DomainGroupMember" }
-            "GenericWrite"        { "abused with Set-DomainObject" }
-            "WriteOwner"          { "abused with Set-DomainObjectOwner" }
-            "WriteDACL"           { "abused with Add-DomainObjectACL" }
-            "AllExtendedRights"   { "abused with Set-DomainUserPassword or Add-DomainGroupMember" }
-            "Self"                { "abused with Add-DomainGroupMember" }
-            default               { $null }  # Skip unimportant ACLs
-        }
-
-        if ($abuse) {
-            $importantAces += [PSCustomObject]@{
-                IdentityReference     = $rule.IdentityReference.Value
-                ActiveDirectoryRights = $aclName
-                AppliesToDescription  = $appliesToDescription
-                AbusePotential        = $abuse
+        try {
+            # Use DirectorySearcher to find the object by name
+            $searcher = New-Object System.DirectoryServices.DirectorySearcher
+            $searcher.Filter = "(&(objectCategory=*)(name=$name))"
+            $searcher.SearchScope = "Subtree"
+            $result = $searcher.FindOne()
+    
+            if ($null -eq $result) {
+                Write-Host "Object not found: $name" -ForegroundColor Red
+                continue
             }
+    
+            # Get the Distinguished Name (DN) of the object
+            $objectDN = $result.Properties["distinguishedname"][0]
+            $directoryEntry = New-Object System.DirectoryServices.DirectoryEntry("LDAP://$objectDN")
+            $securityDescriptor = $directoryEntry.psbase.ObjectSecurity
+            $accessRules = $securityDescriptor.GetAccessRules($true, $true, [System.Security.Principal.NTAccount])
+            
+            foreach ($rule in $accessRules) {
+                if ($rule.IdentityReference.Value -match $TargetUser) {  # Check if the rule applies to the target user
+                    foreach ($permission in $dangerousPermissions) {  # Check for each dangerous permission
+                        $adRight = [System.DirectoryServices.ActiveDirectoryRights]::$permission
+                        if ($rule.ActiveDirectoryRights -band $adRight) {
+                            $matchingRules += $rule  # Add the matching rule to the array
+                            break  # Exit the inner loop once a match is found
+                        }
+                    }
+                }
+            }
+            
+        } catch {
+            Write-Host "Error processing $name $_" -ForegroundColor Red
         }
     }
-    return $importantAces
+
+    # Display the collected rules
+    foreach ($rule in $matchingRules) {
+        Write-Host "-----------------------------------" -ForegroundColor Cyan
+        Write-Host "Identity: $($rule.IdentityReference.Value)" 
+        Write-Host "Rights: $($rule.ActiveDirectoryRights)" -ForegroundColor Red
+        Write-Host "ObjectType: $($rule.ObjectType)"
+        Write-Host "Type: $($rule.AccessControlType)"
+        Write-Host "Inherited: $($rule.IsInherited)"
+        Write-Host "-----------------------------------" -ForegroundColor Cyan 
+    }
 }
+
 
 
 # Finds all SAM_NORMAL_USER_ACCOUNT objects. This might contain Computers and others. To find all "users" use Find-AllUsers
@@ -439,11 +420,13 @@ switch ($FunctionKeyword.ToLower()) {
         $result = Find-Group -baseLdapQuery $baseLdapQuery -groupName $Parameter1
         Get-PropertiesFromObjectsPrettyPrint $result
     }
-    "getacl"{
-        # Find all groups an object is a part of
-        # call FindAllgroupsrecurv to make sure we have a list of all groups and their memebers
-        # Run the ACE check
-        Get-ImportantPermissionsOverObjects -objectName $Parameter1 -allDomainObjects $allDomainObjects
+    "fip"{ #Short for "Find-ImportantPermissions" 
+        # Retrieves a username, checks the user's groups, recursively finds subgroup + members, and lists objects with dangerous ACEs controlled by the user.
+        $objects = Find-UserBasedOnName -baseLdapQuery $baseLdapQuery -name $Parameter1
+        $groups = Find-AllGroupsObjectIsAMemberOf -objects $objects
+        $allSubGroupsAndMemebers = Get-AllSubGroupAndMembersRecursively -GroupNames $groups
+        $fullTargetList = $allSubGroupsAndMemebers + $groups
+        Find-ImportantPermissions -ObjectNames $fullTargetList -TargetUser $Parameter1
     }
 
     "search"{
@@ -451,17 +434,9 @@ switch ($FunctionKeyword.ToLower()) {
         $result = Find-ObjectBasedOnFilter -objects $groups
         Get-PropertiesFromObjectsPrettyPrint $result
     }
-    "test"{
-        $objects = Find-UserBasedOnName -baseLdapQuery $baseLdapQuery -name $Parameter1
-        $groups = Find-AllGroupsObjectIsAMemberOf -objects $objects
-        $allSubGroupsAndMemebers = Get-AllSubGroupAndMembersRecursively -GroupNames $groups
-        $fullTargetList = $allSubGroupsAndMemebers + $groups
-        foreach ($target in $fullTargetList){
-            Write-Host $target
-        }
-    }
+   
     default {
        Show-Options
     }
-    
 }
+
