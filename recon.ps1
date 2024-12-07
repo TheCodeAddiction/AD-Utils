@@ -181,7 +181,7 @@ function Get-PropertiesFromObjectsPrettyPrint($objects) {
         Foreach ($prop in $obj.Properties.PropertyNames) {
             $propName = $prop
             $propValue = $obj.Properties[$prop]
-            
+
             if ($propValue -is [System.Collections.IEnumerable] -and -not ($propValue -is [string])) {
                 $propValue = $propValue -join ", "
             }
@@ -205,10 +205,10 @@ function Get-PropertiesFromObjectsPrettyPrint($objects) {
 
                 }
             }
-            
+
             # What groups the object is a member of
             # TODO: un-nest groups to see all groups the memeber is a part of.
-            if ($propName -eq "memberof") { 
+            if ($propName -eq "memberof") {
                 Write-Host "Is a member of:" -ForegroundColor Cyan
                 foreach ($group in $obj.Properties["memberof"]) {
                     $groupName = $group -replace '^CN=([^,]+),.*', '$1'
@@ -222,8 +222,8 @@ function Get-PropertiesFromObjectsPrettyPrint($objects) {
             } else {
                 Write-Host "${propName}:" -ForegroundColor White -NoNewline
             }
-            
-        
+
+
         }
         Write-Host "-------------------------------"
     }
@@ -252,8 +252,9 @@ function Get-ImportantPermissionsOverObjects($objectName, $targetObjects){
         # check the ACE assigned to the object
         }
     }
-    
-# Grabs the ACL for a given object. This will list all objects that have permissions over the object submited with $objectName.
+
+
+# Takes a list of ObjectNames and checks if TargetUser have any dangerous permissions over those objects
 function Find-ImportantPermissions($ObjectNames, $TargetUser) {
     $dangerousPermissions = @(
         'ForceChangePassword', 
@@ -269,7 +270,6 @@ function Find-ImportantPermissions($ObjectNames, $TargetUser) {
     $matchingRules = @()  # Initialize an array to store matching rules
 
     foreach ($name in $ObjectNames) {
-        Write-Host "Retrieving ACLs for: $name" -ForegroundColor Yellow
 
         try {
             # Use DirectorySearcher to find the object by name
@@ -277,7 +277,7 @@ function Find-ImportantPermissions($ObjectNames, $TargetUser) {
             $searcher.Filter = "(&(objectCategory=*)(name=$name))"
             $searcher.SearchScope = "Subtree"
             $result = $searcher.FindOne()
-    
+
             if ($null -eq $result) {
                 Write-Host "Object not found: $name" -ForegroundColor Red
                 continue
@@ -285,16 +285,25 @@ function Find-ImportantPermissions($ObjectNames, $TargetUser) {
     
             # Get the Distinguished Name (DN) of the object
             $objectDN = $result.Properties["distinguishedname"][0]
+
             $directoryEntry = New-Object System.DirectoryServices.DirectoryEntry("LDAP://$objectDN")
             $securityDescriptor = $directoryEntry.psbase.ObjectSecurity
             $accessRules = $securityDescriptor.GetAccessRules($true, $true, [System.Security.Principal.NTAccount])
-            
+
             foreach ($rule in $accessRules) {
                 if ($rule.IdentityReference.Value -match $TargetUser) {  # Check if the rule applies to the target user
                     foreach ($permission in $dangerousPermissions) {  # Check for each dangerous permission
                         $adRight = [System.DirectoryServices.ActiveDirectoryRights]::$permission
                         if ($rule.ActiveDirectoryRights -band $adRight) {
-                            $matchingRules += $rule  # Add the matching rule to the array
+                            $matchingRule = [PSCustomObject]@{
+                                ObjectName      = $name
+                                Identity        = $rule.IdentityReference.Value
+                                ActiveDirectoryRights = $rule.ActiveDirectoryRights
+                                ObjectType      = $rule.ObjectType
+                                AccessControlType = $rule.AccessControlType
+                                IsInherited     = $rule.IsInherited
+                            }
+                            $matchingRules += $matchingRule  # Add the custom object to the array
                             break  # Exit the inner loop once a match is found
                         }
                     }
@@ -303,19 +312,10 @@ function Find-ImportantPermissions($ObjectNames, $TargetUser) {
             
         } catch {
             Write-Host "Error processing $name $_" -ForegroundColor Red
+            continue
         }
     }
-
-    # Display the collected rules
-    foreach ($rule in $matchingRules) {
-        Write-Host "-----------------------------------" -ForegroundColor Cyan
-        Write-Host "Identity: $($rule.IdentityReference.Value)" 
-        Write-Host "Rights: $($rule.ActiveDirectoryRights)" -ForegroundColor Red
-        Write-Host "ObjectType: $($rule.ObjectType)"
-        Write-Host "Type: $($rule.AccessControlType)"
-        Write-Host "Inherited: $($rule.IsInherited)"
-        Write-Host "-----------------------------------" -ForegroundColor Cyan 
-    }
+    return $matchingRules
 }
 
 
@@ -409,7 +409,7 @@ switch ($FunctionKeyword.ToLower()) {
     }
     "fau" {  # Short for Find-AllUsers
         $result = Find-AllUsers -baseLdapQuery $baseLdapQuery
-        Get-PropertiesFromObjectsPrettyPrint $result  
+        Get-PropertiesFromObjectsPrettyPrint $result
     }
     "fag"{ # Short for Find-AllGroups
         $result = Find-AllGroups -baseLdapQuery $baseLdapQuery
@@ -426,7 +426,16 @@ switch ($FunctionKeyword.ToLower()) {
         $groups = Find-AllGroupsObjectIsAMemberOf -objects $objects
         $allSubGroupsAndMemebers = Get-AllSubGroupAndMembersRecursively -GroupNames $groups
         $fullTargetList = $allSubGroupsAndMemebers + $groups
-        Find-ImportantPermissions -ObjectNames $fullTargetList -TargetUser $Parameter1
+        $dangerousPermissions = Find-ImportantPermissions -ObjectNames $fullTargetList -TargetUser $Parameter1
+        foreach ($rule in $dangerousPermissions) {
+            Write-Host "$TargetUser ($($rule.Identity)) has the following dangerous permission over: $($rule.ObjectName)"
+            Write-Host "-----------------------------------" -ForegroundColor Cyan
+            Write-Host "Rights: $($rule.ActiveDirectoryRights)" -ForegroundColor Red
+            Write-Host "ObjectType: $($rule.ObjectType)"
+            Write-Host "Type: $($rule.AccessControlType)"
+            Write-Host "Inherited: $($rule.IsInherited)"
+            Write-Host "-----------------------------------" -ForegroundColor Cyan
+        }
     }
 
     "search"{
